@@ -11,7 +11,6 @@ class SQLEngine:
         self.query_str = query_str
         self.tables = {}
         self.query_columns = []
-        self.joinFlag = False
         self.condOp = None
         self.aggregationOp = None
         self.distinctOp = None
@@ -81,7 +80,7 @@ class SQLEngine:
                 all(re.match("^[\w*.-]+$", s) is not None for s in columns)
             )
         else:
-            if re.match("^(sum|max|avg)(\([\w*.-]+\))$", columns[0]):
+            if re.match("^(sum|max|avg|min)(\([\w*.-]+\))$", columns[0]):
                 self.aggregationOp = columns[0][:3]
                 return [columns[0][4:-1]]
             else:
@@ -93,7 +92,7 @@ class SQLEngine:
         tables = [table.strip(" ") for table in tables if table != " " or table != ""]
         self.handle_error(all(re.match("^[\w-]+$", s) is not None for s in tables))
         self.handle_error(
-            all(table in self.tables for table in self.query_tables), "Table not found"
+            all(table in self.tables for table in tables), "Table not found"
         )
         return tables
 
@@ -187,11 +186,10 @@ class SQLEngine:
             if self.condOp:
                 ind2 = self.get_matching_indices(self.query_conditions[1])
                 filteredInd = self.operators[self.condOp](ind1,ind2)
-                self.joinFlag = True
             else:
                 filteredInd = ind1
-        for col in self.query_data["columns"]:
-            self.query_data["data"][col] = [self.query_data["data"][col][i] for i in filteredInd]
+            for col in self.query_data["columns"]:
+                self.query_data["data"][col] = [self.query_data["data"][col][i] for i in filteredInd]
 
     def execute_aggregation(self, col, table):
         ret = 0
@@ -202,8 +200,10 @@ class SQLEngine:
             ret = max(data)
         elif self.aggregationOp == "sum":
             ret = sum(data)
+        elif self.aggregationOp == "min":
+            ret = min(data)
         else:
-            ret = sum(data) / max(data)
+            ret = sum(data) / len(data)
         print(self.aggregationOp + "(" + col + ")")
         print(ret)
 
@@ -222,11 +222,6 @@ class SQLEngine:
         header = []
         data = []
         rows = []
-
-        if self.joinFlag and self.query_conditions[1][2] in self.projected_data["columns"]:
-            self.projected_data["columns"].remove(self.query_conditions[1][2])
-            self.projected_data["data"].pop(self.query_conditions[1][2])
-
         for col in self.projected_data["columns"]:
             header.append(col)
             data.append(self.projected_data["data"][col])
