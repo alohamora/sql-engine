@@ -11,12 +11,23 @@ class SQLEngine:
         self.query_str = query_str
         self.tables = {}
         self.query_columns = []
+        self.joinFlag = False
+        self.condOp = None
         self.aggregationOp = None
-        self.distinctOp = False
+        self.distinctOp = None
         self.query_tables = []
         self.query_conditions = []
         self.query_data = {"columns": [], "data": {}}
         self.projected_data = {"columns": [], "data": {}}
+        self.operators = {
+            "AND": lambda a,b: [val for val in a if val in b],
+            "OR": lambda a,b: a + b,
+            "<=": lambda a, b: a <= b,
+            ">=": lambda a, b: a >= b,
+            ">": lambda a, b: a > b,
+            "<": lambda a, b: a < b,
+            "=": lambda a, b: a == b,
+        }
 
     @classmethod
     def execute_query(cls, query_str):
@@ -47,7 +58,9 @@ class SQLEngine:
             self.query_tables = self.parse_tables(
                 " ".join(case_tokens[tokens.index("from") + 1 : tokens.index("where")])
             )
-            self.query_conditions = tokens[tokens.index("where") + 1 :]
+            self.query_conditions = self.parse_conditions(
+                "".join(case_tokens[tokens.index("where") + 1 :])
+            )
         else:
             self.handle_error(
                 tokens.index("from") != len(tokens) - 1, "No table names provided"
@@ -84,11 +97,38 @@ class SQLEngine:
         )
         return tables
 
+    def parse_conditions(self, condstr):
+        condstr = condstr.strip(" ")
+        try:
+            search = re.search("AND|OR", condstr)
+            if search:
+                self.condOp = search.group()
+                condstr = re.sub("AND|OR", " ", condstr)
+                conditions = re.split("\s+", condstr)
+            else:
+                conditions = [condstr]
+            ret = []
+            for cond in conditions:
+                operator = None
+                for op in ["<=", ">=", ">", "<", "="]:
+                    opSearch = re.search(op, cond)
+                    if opSearch:
+                        operator = opSearch.group()
+                        break
+                self.handle_error(operator)
+                cond = re.sub("<|>|<=|>=|=", " ", cond)
+                parts = re.split("\s+", cond)
+                ret.append((parts[0], operator, parts[1]))
+        except:
+            self.handle_error()
+        return ret
+
     def run_query(self):
+        self.join_tables()
+        self.execute_conditions()
         if self.aggregationOp is not None:
             self.execute_aggregation(self.query_columns[0], self.query_tables[0])
         else:
-            self.join_tables()
             self.project_columns()
             self.display_table()
 
@@ -109,48 +149,72 @@ class SQLEngine:
             for i, col in enumerate(self.query_data["columns"]):
                 self.query_data["data"][col].append(row[i])
 
+    def check_column(self, column):
+        data_columns = [col.split(".")[1] for col in self.query_data["columns"]]
+        if "." in column:
+            self.handle_error(
+                column in self.query_data["columns"], "Incorrect column name provided"
+            )
+            col = column
+        else:
+            self.handle_error(column in data_columns, "Incorrect column name provided")
+            self.handle_error(
+                data_columns.count(column) == 1, "Ambiguous column name given"
+            )
+            col = self.query_data["columns"][data_columns.index(column)]
+        return col
+
+    def get_matching_indices(self, cond):
+        ret = []
+        colname = self.check_column(cond[0])
+        col1 = self.query_data["data"][colname]
+        if not self.is_int(cond[2]):
+            colname = self.check_column(cond[2])
+            col2 = self.query_data["data"][colname]
+            for i, val in enumerate(zip(col1, col2)):
+                if self.operators[cond[1]](val[0], val[1]):
+                    ret.append(i)
+        else:
+            for i, val in enumerate(col1):
+                if self.operators[cond[1]](val, int(cond[2])):
+                    ret.append(i)
+        return ret
+
+    def execute_conditions(self):
+        if self.query_conditions:
+            filteredInd = []
+            ind1 = self.get_matching_indices(self.query_conditions[0])
+            if self.condOp:
+                ind2 = self.get_matching_indices(self.query_conditions[1])
+                filteredInd = self.operators[self.condOp](ind1,ind2)
+                self.joinFlag = True
+            else:
+                filteredInd = ind1
+        for col in self.query_data["columns"]:
+            self.query_data["data"][col] = [self.query_data["data"][col][i] for i in filteredInd]
+
     def execute_aggregation(self, col, table):
         ret = 0
         data = []
-        if "." in col:
-            self.handle_error(table == col.split(".")[0], "Ambiguous column name given")
-            col = col.split(".")[1]
-        self.handle_error(
-            col in self.tables[table]["data"], "column not present in table"
-        )
-        data = self.tables[table]["data"][col]
+        col = self.check_column(col)
+        data = self.query_data["data"][col]
         if self.aggregationOp == "max":
             ret = max(data)
         elif self.aggregationOp == "sum":
             ret = sum(data)
         else:
             ret = sum(data) / max(data)
-        print(self.aggregationOp + "(" + table + "." + col + ")")
+        print(self.aggregationOp + "(" + col + ")")
         print(ret)
 
     def project_columns(self):
         if self.query_columns[0] != "*":
-            data_columns = [col.split(".")[1] for col in self.query_data["columns"]]
             for col in self.query_columns:
-                if "." in col:
-                    self.handle_error(
-                        col in self.query_data["columns"],
-                        "Incorrect column name provided",
-                    )
-                    self.projected_data["columns"].append(col)
-                    self.projected_data["data"][col] = self.query_data["data"][col]
-                else:
-                    self.handle_error(
-                        col in data_columns, "Incorrect column name provided"
-                    )
-                    self.handle_error(
-                        data_columns.count(col) == 1, "Ambiguous column name given"
-                    )
-                    column_name = self.query_data["columns"][data_columns.index(col)]
-                    self.projected_data["columns"].append(column_name)
-                    self.projected_data["data"][column_name] = self.query_data["data"][
-                        column_name
-                    ]
+                column_name = self.check_column(col)
+                self.projected_data["columns"].append(column_name)
+                self.projected_data["data"][column_name] = self.query_data["data"][
+                    column_name
+                ]
         else:
             self.projected_data = self.query_data
 
@@ -158,6 +222,11 @@ class SQLEngine:
         header = []
         data = []
         rows = []
+
+        if self.joinFlag and self.query_conditions[1][2] in self.projected_data["columns"]:
+            self.projected_data["columns"].remove(self.query_conditions[1][2])
+            self.projected_data["data"].pop(self.query_conditions[1][2])
+
         for col in self.projected_data["columns"]:
             header.append(col)
             data.append(self.projected_data["data"][col])
@@ -173,7 +242,6 @@ class SQLEngine:
             else:
                 print(",".join(row))
                 rows.append(row)
-        print("length of result table: {}".format(len(rows)))
 
     def read_table(self, table_metadata):
         tablename = table_metadata[0]
@@ -202,9 +270,17 @@ class SQLEngine:
             self.read_table(metadata[start + 1 : end])
 
     @staticmethod
-    def handle_error(cond, msg="Incorrect query format"):
+    def handle_error(cond=False, msg="Incorrect query format"):
         if not cond:
             sys.exit("[SQL-ENGINE]: {}".format(msg))
+
+    @staticmethod
+    def is_int(s):
+        try:
+            int(s)
+            return True
+        except ValueError:
+            return False
 
 
 if __name__ == "__main__":
